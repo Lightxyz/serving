@@ -219,11 +219,16 @@ func (rt *revisionThrottler) try(ctx context.Context, function func(string) erro
 	// Retrying infinitely as long as we receive no dest. Outer semaphore and inner
 	// pod capacity are not changed atomically, hence they can race each other. We
 	// "reenqueue" requests should that happen.
+	rt.logger.Debugw("revisionThrottler.try - enter")
 	reenqueue := true
 	for reenqueue {
 		reenqueue = false
 		if err := rt.breaker.Maybe(ctx, func() {
+			rt.logger.Debugw("revisionThrottler.try - Maybe passed")
+
+			rt.logger.Debugw("revisionThrottler.try - load balancing - enter")
 			cb, tracker := rt.acquireDest(ctx)
+			rt.logger.Debugw("revisionThrottler.try - load balancing - done")
 			if tracker == nil {
 				// This can happen if individual requests raced each other or if pod
 				// capacity was decreased after passing the outer semaphore.
@@ -232,6 +237,7 @@ func (rt *revisionThrottler) try(ctx context.Context, function func(string) erro
 			}
 			defer cb()
 			// We already reserved a guaranteed spot. So just execute the passed functor.
+			rt.logger.Debugw("revisionThrottler.try - instance determined")
 			ret = function(tracker.dest)
 		}); err != nil {
 			return err
@@ -516,7 +522,10 @@ func (t *Throttler) run(updateCh <-chan revisionDestsUpdate) {
 
 // Try waits for capacity and then executes function, passing in a l4 dest to send a request
 func (t *Throttler) Try(ctx context.Context, revID types.NamespacedName, function func(string) error) error {
+	t.logger.Debugw("Throttler.Try - before getOrCreateRevisionThrottler", zap.String(logkey.Key, revID.String()))
 	rt, err := t.getOrCreateRevisionThrottler(revID)
+	t.logger.Debugw("Throttler.Try - after getOrCreateRevisionThrottler", zap.String(logkey.Key, revID.String()))
+
 	if err != nil {
 		return err
 	}
@@ -526,16 +535,20 @@ func (t *Throttler) Try(ctx context.Context, revID types.NamespacedName, functio
 func (t *Throttler) getOrCreateRevisionThrottler(revID types.NamespacedName) (*revisionThrottler, error) {
 	// First, see if we can succeed with just an RLock. This is in the request path so optimizing
 	// for this case is important
+	t.logger.Debugw("Acquiring revision throttler read lock.", zap.String(logkey.Key, revID.String()))
 	t.revisionThrottlersMutex.RLock()
 	revThrottler, ok := t.revisionThrottlers[revID]
+	t.logger.Debugw("Releasing revision throttler read lock.", zap.String(logkey.Key, revID.String()))
 	t.revisionThrottlersMutex.RUnlock()
 	if ok {
 		return revThrottler, nil
 	}
 
 	// Redo with a write lock since we failed the first time and may need to create
+	t.logger.Debugw("Acquiring revision throttler write lock.", zap.String(logkey.Key, revID.String()))
 	t.revisionThrottlersMutex.Lock()
 	defer t.revisionThrottlersMutex.Unlock()
+	defer t.logger.Debugw("Releasing revision throttler write lock.", zap.String(logkey.Key, revID.String()))
 	revThrottler, ok = t.revisionThrottlers[revID]
 	if !ok {
 		rev, err := t.revisionLister.Revisions(revID.Namespace).Get(revID.Name)
@@ -562,10 +575,12 @@ func (t *Throttler) revisionUpdated(obj interface{}) {
 
 	t.logger.Debug("Revision update", zap.String(logkey.Key, revID.String()))
 
+	t.logger.Debugw("Throttler.revisionUpdated - before getOrCreateRevisionThrottler", zap.String(logkey.Key, revID.String()))
 	if _, err := t.getOrCreateRevisionThrottler(revID); err != nil {
 		t.logger.Errorw("Failed to get revision throttler for revision",
 			zap.Error(err), zap.String(logkey.Key, revID.String()))
 	}
+	t.logger.Debugw("Throttler.revisionUpdated - after getOrCreateRevisionThrottler", zap.String(logkey.Key, revID.String()))
 }
 
 // revisionDeleted is to clean up revision throttlers after a revision is deleted to prevent unbounded
@@ -587,6 +602,7 @@ func (t *Throttler) revisionDeleted(obj interface{}) {
 }
 
 func (t *Throttler) handleUpdate(update revisionDestsUpdate) {
+	t.logger.Debugw("Throttler.handleUpdate - before getOrCreateRevisionThrottler", zap.String(logkey.Key, update.Rev.String()))
 	if rt, err := t.getOrCreateRevisionThrottler(update.Rev); err != nil {
 		if k8serrors.IsNotFound(err) {
 			t.logger.Debugw("Revision not found. It was probably removed", zap.String(logkey.Key, update.Rev.String()))
@@ -596,6 +612,7 @@ func (t *Throttler) handleUpdate(update revisionDestsUpdate) {
 	} else {
 		rt.handleUpdate(update)
 	}
+	t.logger.Debugw("Throttler.handleUpdate - after getOrCreateRevisionThrottler", zap.String(logkey.Key, update.Rev.String()))
 }
 
 func (t *Throttler) handlePubEpsUpdate(eps *corev1.Endpoints) {
@@ -608,6 +625,8 @@ func (t *Throttler) handlePubEpsUpdate(eps *corev1.Endpoints) {
 		return
 	}
 	rev := types.NamespacedName{Name: revN, Namespace: eps.Namespace}
+
+	t.logger.Debugw("Throttler.handlePubEpsUpdate - before getOrCreateRevisionThrottler", zap.String(logkey.Key, rev.String()))
 	if rt, err := t.getOrCreateRevisionThrottler(rev); err != nil {
 		if k8serrors.IsNotFound(err) {
 			t.logger.Debugw("Revision not found. It was probably removed", zap.String(logkey.Key, rev.String()))
@@ -617,6 +636,7 @@ func (t *Throttler) handlePubEpsUpdate(eps *corev1.Endpoints) {
 	} else {
 		rt.handlePubEpsUpdate(eps, t.ipAddress)
 	}
+	t.logger.Debugw("Throttler.handlePubEpsUpdate - after getOrCreateRevisionThrottler", zap.String(logkey.Key, rev.String()))
 }
 
 func (rt *revisionThrottler) handlePubEpsUpdate(eps *corev1.Endpoints, selfIP string) {

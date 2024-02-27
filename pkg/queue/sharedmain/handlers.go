@@ -45,7 +45,7 @@ func mainHandler(
 	logger *zap.SugaredLogger,
 	ce *queue.ConcurrencyEndpoint,
 ) (http.Handler, *pkghandler.Drainer) {
-	target := net.JoinHostPort("127.0.0.1", env.UserPort)
+	target := net.JoinHostPort(env.GuestAddr, env.GuestPort)
 
 	httpProxy := pkghttp.NewHeaderPruningReverseProxy(target, pkghttp.NoHostOverride, activator.RevisionHeaders, false /* use HTTP */)
 	httpProxy.Transport = transport
